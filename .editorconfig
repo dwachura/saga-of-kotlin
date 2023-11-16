@@ -1,0 +1,56 @@
+root = true
+
+[*]
+indent_style = space
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.md]
+indent_size = 2
+trim_trailing_whitespace = false
+
+[{*.kt,*.kts}]
+### imports
+ij_kotlin_name_count_to_use_star_import = 9999
+ij_kotlin_name_count_to_use_star_import_for_members = 9999
+ij_kotlin_packages_to_use_import_on_demand =
+### code style
+ij_kotlin_code_style_defaults = KOTLIN_OFFICIAL
+ij_kotlin_assignment_wrap = normal
+ij_kotlin_call_parameters_new_line_after_left_paren = true
+ij_kotlin_call_parameters_right_paren_on_new_line = true
+ij_kotlin_call_parameters_wrap = on_every_item
+ij_kotlin_continuation_indent_for_chained_calls = false
+ij_kotlin_continuation_indent_for_expression_bodies = false
+ij_kotlin_continuation_indent_in_argument_lists = false
+ij_kotlin_continuation_indent_in_elvis = false
+ij_kotlin_continuation_indent_in_if_conditions = false
+ij_kotlin_continuation_indent_in_parameter_lists = false
+ij_kotlin_continuation_indent_in_supertype_lists = false
+ij_kotlin_extends_list_wrap = normal
+ij_kotlin_if_rparen_on_new_line = true
+ij_kotlin_method_call_chain_wrap = normal
+ij_kotlin_method_parameters_new_line_after_left_paren = true
+ij_kotlin_method_parameters_right_paren_on_new_line = true
+ij_kotlin_method_parameters_wrap = on_every_item
+ij_kotlin_wrap_expression_body_functions = 1
+ij_kotlin_line_break_after_multiline_when_entry = false
+
+[*.java]
+### imports
+ij_java_class_count_to_use_import_on_demand = 9999
+ij_java_names_count_to_use_import_on_demand = 9999
+ij_java_packages_to_use_import_on_demand =
+### code style
+ij_java_keep_builder_methods_indents = true
+
+[{*.gant,*.groovy,*.gy}]
+### imports
+ij_groovy_class_count_to_use_import_on_demand = 9999
+ij_groovy_names_count_to_use_import_on_demand = 9999
+ij_groovy_packages_to_use_import_on_demand =
+
+[{*.ftl,*.htm,*.html,*.sht,*.shtm,*.shtml}]
+### code style
+ij_html_do_not_indent_children_of_tags = html

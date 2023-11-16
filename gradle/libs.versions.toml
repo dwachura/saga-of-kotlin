@@ -1,0 +1,14 @@
+[versions]
+kotlin = "1.9.10"
+kotest = "5.7.0"
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+
+[libraries]
+kotest-junit5 = { module = "io.kotest:kotest-runner-junit5", version.ref = "kotest" }
+kotest-assertions = { module = "io.kotest:kotest-assertions-core", version.ref = "kotest" }
+kotest-property = { module = "io.kotest:kotest-property", version.ref = "kotest" }
+
+[bundles]
+kotest = [ "kotest-junit5", "kotest-assertions", "kotest-property" ]
