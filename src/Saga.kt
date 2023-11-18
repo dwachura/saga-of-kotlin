@@ -1,28 +1,37 @@
 package io.dwsoft.sok
 
-class SagaScope<T>(private val f: suspend SagaScope<T>.() -> T) {
-    val compensations = mutableListOf<suspend () -> Unit>()
+/**
+ * Revertible operation producing result of type T, composed of different revertible steps.
+ */
+class Saga<T>(
+    override val title: String? = null,
+    private val steps: List<Revertible<*>>,
+    private val finalizer: () -> T,
+) : Revertible<T> {
+    private val completedSteps = mutableListOf<Revertible<*>>()
 
-    suspend fun exec(): T =
-        runCatching { f() }
-            .onFailure {
-//                if (it is Error)
-                println("Saga failed. Compensating...")
-                compensations.forEach { it() }
-            }.getOrThrow()
+    override fun invoke(): T {
+        steps.forEach {
+            runCatching { it() }
+                .fold(
+                    onSuccess = { _ -> completedSteps += it },
+                    onFailure = { it.throwNonCatchable().recover(::revert) }
+                )
+        }
+        return finalizer()
+    }
+
+    override fun revert(reason: Any) {
+        completedSteps.forEach {
+            runCatching { it.revert(reason) }
+                .fold(
+                    onSuccess = {},
+                    onFailure = { throw it }
+                )
+        }
+        if (reason is Throwable) throw reason
+    }
 }
-
-fun <T> saga(f: suspend SagaScope<T>.() -> T): SagaScope<T> = SagaScope(f)
-
-fun <T> SagaScope<*>.phase(f: suspend () -> T): PhaseBuilder<T> = PhaseBuilder(this, f)
-
-class PhaseBuilder<T>(private val sagaScope: SagaScope<*>, private val f: suspend () -> T) {
-    suspend infix fun compensate(withAction: suspend (T) -> Unit) =
-        f().also { sagaScope.compensations += { withAction(it) } }
-}
-
-//inline fun <T, R> T.safelyRun(f: T.() -> R): Result<R> =
-//    runCatching(f).onFailure
 
 fun <T : Throwable> T.throwNonCatchable(): T = takeUnless { it is Error } ?: throw this
 

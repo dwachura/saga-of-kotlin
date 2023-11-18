@@ -15,32 +15,30 @@ import kotlin.random.Random
  *  - onCompensationError() {} is needed
  *      * defined on Saga or/and Phase?
  *      * how to handle errors in simultaneous compensating actions?
+ *  - Saga builder must not be suspended (to be confirmed)
+ *
+ *  - Reversible.title: String?
+ *  - Steps indexed in saga
+ *  - RevertingException handling mode for Saga - interface with TreatAsFatal, Ignore, Journaling (for future)
+ *  implementations (still log internally every time)
+ *
+ *  - DSL:
+ *      - lazy step result usable in other steps (val t: Lazy<T> = step { T } revertedBy { ... }
+ *      - step(Saga<T>): Lazy<T>
+ *      - separate business from reverting definitions style
+ *       - suspensions, coroutines and how to define and run parallel steps
+ *
+ *      nice Dsl:
+ *          saga {
+ *              val x: Lazy<Int> = step { 1 } revertedBy { ... }
+ *              val y: Lazy<Int> = step { x.value + 2 } revertedBy { ... }
+ *              result(x + y)
+ *          }
+ *
+ *      perfect Dsl:
+ *          saga {
+ *              val x: Int = step { 1 } revertedBy { ... }
+ *              val y: Int = step { x + 2 } revertedBy { ... }
+ *              x + y
+ *          }
  */
-
-suspend fun main() {
-    val numbers = mutableListOf<Int>()
-    runCatching {
-        saga {
-            println("Saga started...")
-            phase {
-                Random.nextInt().also { println("Adding first number $it"); numbers += it }
-            } compensate {
-                println("Compensating 1"); numbers.remove(it)
-            }
-            println("numbers: $numbers")
-            phase {
-                Random.nextInt().also { println("Adding second number $it"); numbers += it }
-            } compensate {
-                println("Compensating 2"); numbers.remove(it)
-            }
-            println("numbers: $numbers")
-            phase {
-                Random.nextInt().also { println("Adding third number $it"); throw RuntimeException("error") }
-            } compensate {
-                println("Compensating 3"); numbers.remove(it)
-            }
-            println("numbers: $numbers")
-        }.exec()
-    }
-    println("numbers: $numbers")
-}

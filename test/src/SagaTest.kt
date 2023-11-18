@@ -2,27 +2,34 @@ package io.dwsoft.sok
 
 import io.kotest.assertions.throwables.shouldThrowMessage
 import io.kotest.core.spec.style.FreeSpec
+import io.kotest.matchers.maps.shouldBeEmpty
 import io.kotest.matchers.shouldNotBe
 
 class SagaTest : FreeSpec({
-    "failed phase is not compensated" {
+    "failed step is not reverted" {
         var obj: Any? = null
-        val saga = saga {
-            phase { obj = Any(); error("fail") } compensate { obj = null }
-        }
+        val revertible = Revertible({ obj = Any(); error("fail") }) { obj = null }
+        val saga = Saga(steps = listOf(revertible)) {}
 
         shouldThrowMessage("fail") {
-            saga.exec()
+            saga.invoke()
         }
         obj shouldNotBe null
     }
 
-    "all completed phases are compensated" {
+    "every completed step is reverted" {
         val map = mutableMapOf<String, Int>()
-        saga {
-            phase { map["phase1"] = 1 } compensate { map.remove("phase1") }
-            phase { map["phase1"] = 1 } compensate { map.remove("phase1") }
+        val successfulSteps = (1..2).map { idx ->
+            Revertible(
+                { map["phase$idx"] = idx }
+            ) { map.remove("phase$idx") }
         }
-    }
+        val failedStep = Revertible({ error("fail") }) {}
+        val saga = Saga(steps = successfulSteps + failedStep) {}
 
+        shouldThrowMessage("fail") {
+            saga.invoke()
+        }
+        map.shouldBeEmpty()
+    }
 })
