@@ -24,7 +24,11 @@ repositories {
 }
 
 dependencies {
+    implementation(libs.slf4j)
+    implementation(libs.kotlin.logging)
+
     testImplementation(libs.bundles.kotest)
+    testRuntimeOnly(libs.logback)
 }
 
 tasks.test {

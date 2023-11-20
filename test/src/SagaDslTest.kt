@@ -11,12 +11,12 @@ class SagaDslTest : FreeSpec({
         val (expectedNum1, expectedNum2) = listOf(Random.nextInt(), Random.nextInt())
 
         val saga = saga {
-            val x = step { expectedNum1 } revertedBy {}
-            val y = step { x.value + expectedNum2 } revertedBy {}
+            val x = phase { expectedNum1 } compensatedBy {}
+            val y = phase { x.value + expectedNum2 } compensatedBy {}
             returning { x.value + y.value }
         }
 
-        saga.invoke() shouldBe expectedNum1 + (expectedNum1 + expectedNum2)
+        saga.execute() shouldBe expectedNum1 + (expectedNum1 + expectedNum2)
     }
 
     "working reverted saga is constructed" {
@@ -26,17 +26,17 @@ class SagaDslTest : FreeSpec({
         val map = mutableMapOf<UUID, Int>()
 
         val saga = saga {
-            val uuid = step { expectedUuid } revertedBy {}
-            val number = step {
+            val uuid = phase { expectedUuid } compensatedBy {}
+            val number = phase {
                 map[uuid.value] = expectedNumber
                 expectedNumber
-            } revertedBy { map.remove(uuid.value) }
-            step({ error("Failed ${uuid.value}:${number.value}") }, revertedBy = {})
+            } compensatedBy { map.remove(uuid.value) }
+            phase({ error("Failed ${uuid.value}:${number.value}") }, revertedBy = {})
             returning {}
         }
 
         shouldThrowMessage(expectedErrorMessage) {
-            saga.invoke()
+            saga.execute()
         }
     }
 })

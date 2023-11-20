@@ -24,7 +24,7 @@ import kotlin.random.Random
  *
  *  - DSL:
  *      - lazy step result usable in other steps (val t: Lazy<T> = step { T } revertedBy { ... }
- *      - step(Saga<T>): Lazy<T>
+ *      - step(Saga<T>): Lazy<T> (require saga composition)
  *      - separate business from reverting definitions style
  *       - suspensions, coroutines and how to define and run parallel steps
  *
