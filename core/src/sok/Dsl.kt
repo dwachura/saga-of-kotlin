@@ -6,24 +6,24 @@ fun <T> saga(config: SagaBuilderScope<T>.() -> SagaResult<T>): Saga<T> =
     }
 
 sealed interface SagaBuilderScope<T> {
-    fun <R> phase(operation: () -> R, revertedBy: CompensatingAction): PhaseResult<R>
-    fun returning(finalizer: () -> T): SagaResult<T>
+    fun <R> phase(operation: Action<R>, revertedBy: Rollback): PhaseResult<R>
+    fun returning(finalizer: Action<T>): SagaResult<T>
 }
 
 private class SagaBuilder<T> : SagaBuilderScope<T> {
-    val phases = mutableListOf<SagaPhase<*>>()
-    lateinit var finalizer: () -> T
+    val phases = mutableListOf<ReversibleOperation<*>>()
+    lateinit var finalizer: Action<T>
 
-    override fun <R> phase(operation: () -> R, revertedBy: CompensatingAction): PhaseResult<R> {
+    override fun <R> phase(operation: Action<R>, revertedBy: Rollback): PhaseResult<R> {
         val deferred = DeferredValueImpl<R>()
-        phases += SagaPhase(
+        phases += ReversibleOperation(
             operation = { operation().also { deferred._value = lazyOf(it) } },
             revertedBy = revertedBy
         )
         return PhaseResultImpl(deferred)
     }
 
-    override fun returning(finalizer: () -> T): SagaResult<T> {
+    override fun returning(finalizer: Action<T>): SagaResult<T> {
         val deferred = DeferredValueImpl<T>()
         this.finalizer = { finalizer().also { deferred._value = lazyOf(it) } }
         return SagaResultImpl(deferred)
@@ -49,16 +49,16 @@ private class PhaseResultImpl<T>(value: DeferredValueImpl<T>) : PhaseResult<T>, 
 
 private class SagaResultImpl<T>(value: DeferredValueImpl<T>) : SagaResult<T>, DeferredValue<T> by value
 
-fun <T> SagaBuilderScope<*>.phase(operation: () -> T): PhaseBuilderScope<T> =
+fun <T> SagaBuilderScope<*>.phase(operation: Action<T>): PhaseBuilderScope<T> =
     PhaseBuilder { phase(operation = operation, revertedBy = it) }
 
 sealed interface PhaseBuilderScope<T> {
-    infix fun compensatedBy(rollback: CompensatingAction): PhaseResult<T>
+    infix fun revertedBy(rollback: Rollback): PhaseResult<T>
 }
 
 private class PhaseBuilder<T>(
-    private val constructStep: (CompensatingAction) -> PhaseResult<T>
+    private val buildPhase: (Rollback) -> PhaseResult<T>
 ) : PhaseBuilderScope<T> {
-    override fun compensatedBy(rollback: CompensatingAction): PhaseResult<T> =
-        constructStep(rollback)
+    override fun revertedBy(rollback: Rollback): PhaseResult<T> =
+        buildPhase(rollback)
 }
