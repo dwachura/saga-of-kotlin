@@ -9,6 +9,7 @@ import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.maps.shouldBeEmpty
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -19,8 +20,9 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
 @OptIn(ExperimentalStdlibApi::class, ExperimentalCoroutinesApi::class)
-class CoroutinesSagaProcessorTest : FreeSpec({
+class CoroutinesSagaInvokerTest : FreeSpec({
     "saga is processed sequentially and returns correct result".config(coroutineTestScope = true) {
+        val sagaScope = CoroutineScope(coroutineContext)
         val expectedObj = mutableListOf<Int>()
         fun delayedPhase(delaySeconds: Int) =
             ReversibleOperation(

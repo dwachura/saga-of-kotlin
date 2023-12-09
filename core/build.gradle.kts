@@ -4,5 +4,5 @@ plugins {
 }
 
 dependencies {
-    testImplementation(projects.coroutines)
+//    testImplementation(projects.coroutines)
 }

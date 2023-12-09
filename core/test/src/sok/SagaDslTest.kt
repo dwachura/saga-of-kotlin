@@ -15,7 +15,7 @@ class SagaDslTest : FreeSpec({
             returning { x.value + y.value }
         }
 
-        saga.execute(CoroutinesSagaProcessor().runner) shouldBe expectedNum1 + (expectedNum1 + expectedNum2)
+        saga.execute() shouldBe expectedNum1 + (expectedNum1 + expectedNum2)
     }
 
     "working reverted saga is constructed" {
@@ -35,7 +35,9 @@ class SagaDslTest : FreeSpec({
         }
 
         shouldThrowMessage(expectedErrorMessage) {
-            saga.execute(CoroutinesSagaProcessor().runner)
+            saga.execute()
         }
     }
 })
+
+private fun <T> Saga<T>.execute(): T = invoke(sequentialSagaInvoker())
