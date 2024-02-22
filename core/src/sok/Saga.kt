@@ -1,18 +1,35 @@
 package io.dwsoft.sok
 
-sealed interface Saga<OpKind : Reversible<*, *>, Result> {
-    val ops: Collection<OpKind>
-    val finalizer: Finalizer<Result>
+sealed interface Saga<Success, Failure> {
+    interface NonSuspending<Success, Failure> : Saga<Success, Failure> {
+        /**
+         * @throws SagaException
+         */
+        fun execute(): Result<Success, Failure>
+        fun toReversibleOp(): ReversibleOp.NonSuspending<Result<Success, Failure>>
+    }
 
-    class NonSuspending<T>(
-        override val ops: Collection<Reversible.NonSuspendingOp<*>>,
-        override val finalizer: Finalizer<T>
-    ) : Saga<Reversible.NonSuspendingOp<*>, T>
+    interface Suspending<Success, Failure> : Saga<Success, Failure> {
+        /**
+         * @throws SagaException
+         */
+        suspend fun execute(): Result<Success, Failure>
+        fun toReversibleOp(): ReversibleOp.Suspending<Result<Success, Failure>>
+    }
 
-    class Suspending<T>(
-        override val ops: Collection<Reversible.SuspendingOp<*>>,
-        override val finalizer: Finalizer<T>
-    ) : Saga<Reversible.SuspendingOp<*>, T>
+    sealed interface Result<out Success, out Failure> {
+        @JvmInline
+        value class Completed<Success>(val value: Success) : Result<Success, Nothing>
+
+        @JvmInline
+        value class Compensated<Failure>(val reason: Failure) : Result<Nothing, Failure>
+    }
 }
 
-typealias Finalizer<T> = () -> T
+class SagaException private constructor(
+    message: String? = null,
+    cause: Throwable? = null,
+) : RuntimeException(message, cause, true, true) {
+    constructor(cause: Throwable) : this(message = null, cause = cause)
+    constructor(message: String) : this(message = message, cause = null)
+}

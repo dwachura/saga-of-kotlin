@@ -44,6 +44,7 @@ dependencies {
     implementation(libs.kotlin.logging)
 
     testImplementation(libs.bundles.kotest)
+    testImplementation(libs.mockk)
     testRuntimeOnly(libs.logback)
 }
 

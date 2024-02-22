@@ -2,6 +2,7 @@
 kotlin = "1.9.10"
 gradle-test-logger-plugin = "4.0.0"
 kotest = "5.7.0"
+mockk = "1.13.9"
 sl4j = "2.0.9"
 kotlin-logging = "5.1.0"
 logback = "1.4.6"
@@ -13,10 +14,10 @@ kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 [libraries]
 gradle-plugins-kotlin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
 gradle-plugins-testlogger = { module = "com.adarshr:gradle-test-logger-plugin", version.ref = "gradle-test-logger-plugin" }
-
 kotest-junit5 = { module = "io.kotest:kotest-runner-junit5", version.ref = "kotest" }
 kotest-assertions = { module = "io.kotest:kotest-assertions-core", version.ref = "kotest" }
 kotest-property = { module = "io.kotest:kotest-property", version.ref = "kotest" }
+mockk = { module = "io.mockk:mockk", version.ref = "mockk" }
 slf4j = { module = "org.slf4j:slf4j-api", version.ref = "sl4j" }
 kotlin-logging = { module = "io.github.oshai:kotlin-logging-jvm", version.ref = "kotlin-logging" }
 logback = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
