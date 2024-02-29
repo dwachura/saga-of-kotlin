@@ -1,6 +1,6 @@
 package io.dwsoft.sok
 
-sealed interface Saga<Success, Failure> {
+sealed interface Saga<Success, out Failure> {
     interface NonSuspending<Success, Failure> : Saga<Success, Failure> {
         /**
          * @throws SagaException
