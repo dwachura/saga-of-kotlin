@@ -1,7 +1,7 @@
 package io.dwsoft.sok
 
-sealed interface Saga<Success, out Failure> {
-    interface NonSuspending<Success, Failure> : Saga<Success, Failure> {
+sealed interface Saga<Success, out Failure : Any> {
+    interface NonSuspending<Success, Failure : Any> : Saga<Success, Failure> {
         /**
          * @throws SagaException
          */
@@ -9,7 +9,7 @@ sealed interface Saga<Success, out Failure> {
         fun toReversibleOp(): ReversibleOp.NonSuspending<Result<Success, Failure>>
     }
 
-    interface Suspending<Success, Failure> : Saga<Success, Failure> {
+    interface Suspending<Success, Failure : Any> : Saga<Success, Failure> {
         /**
          * @throws SagaException
          */
@@ -17,12 +17,12 @@ sealed interface Saga<Success, out Failure> {
         fun toReversibleOp(): ReversibleOp.Suspending<Result<Success, Failure>>
     }
 
-    sealed interface Result<out Success, out Failure> {
+    sealed interface Result<out Success, out Failure : Any> {
         @JvmInline
         value class Success<Success>(val value: Success) : Result<Success, Nothing>
 
         @JvmInline
-        value class Failure<Failure>(val reason: Failure) : Result<Nothing, Failure>
+        value class Failure<Failure : Any>(val reason: Failure) : Result<Nothing, Failure>
     }
 }
 

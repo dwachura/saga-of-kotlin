@@ -3,8 +3,9 @@ package io.dwsoft.sok
 import io.github.oshai.kotlinlogging.KotlinLogging
 import java.util.concurrent.CompletableFuture
 
+// TODO: debug logs + tracking of saga nesting
 // FIXME: order of rollbacks should be from the latest one - change tests and fix implementation
-fun <Success, Failure> saga(
+fun <Success, Failure : Any> saga(
     configuration: SagaBuildingScope<Success, Failure>.() -> SagaResult<Success>
 ): Saga.NonSuspending<Success, Failure> =
     SagaBuildingScopeImpl<Success, Failure>().let { buildingScope ->
@@ -32,6 +33,10 @@ fun <Success, Failure> saga(
                 }.recoverCatching {
                     when (it) {
                         is SagaActionFailure -> Saga.Result.Failure(it.reason)
+                        is NestedSagaFailure -> {
+                            rollbacks += it.rollback
+                            Saga.Result.Failure(it.reason)
+                        }
                         is SagaException -> throw it.cause ?: it
                         else -> throw it
                     }
@@ -46,7 +51,7 @@ fun <Success, Failure> saga(
                 )
             }
 
-            private val SagaActionFailure.reason: Failure
+            private val InternalSagaException.reason: Failure
                 @Suppress("UNCHECKED_CAST")
                 get() = rawReason as Failure
         }
@@ -55,7 +60,7 @@ fun <Success, Failure> saga(
 private typealias SagaActionPhaseResult<Success, Failure> = Pair<Saga.Result<Success, Failure>, List<() -> Unit>>
 
 @SagaDsl
-sealed interface SagaBuildingScope<Success, Failure> {
+sealed interface SagaBuildingScope<Success, Failure : Any> {
     fun <T> atomic(
         action: SagaActionScope<T, Failure>.() -> T,
         compensateWith: SagaActionRollbackScope.(actionResult: T) -> Unit
@@ -66,7 +71,7 @@ sealed interface SagaBuildingScope<Success, Failure> {
     fun <T> atomic(saga: Saga<T, Failure>): LateResult<T>
 }
 
-private class SagaBuildingScopeImpl<Success, Failure> : SagaBuildingScope<Success, Failure> {
+private class SagaBuildingScopeImpl<Success, Failure : Any> : SagaBuildingScope<Success, Failure> {
     val actions = mutableListOf<ReversibleOp.NonSuspending<Saga.Result<*, Failure>>>()
     lateinit var finalizer: () -> SagaResult<Success>
 
@@ -108,22 +113,17 @@ private class SagaBuildingScopeImpl<Success, Failure> : SagaBuildingScope<Succes
             is Saga.NonSuspending -> saga.toReversibleOp()
             is Saga.Suspending -> saga.toReversibleOp().toNonSuspending()
         }
-        val rollback = LateResultImpl<() -> Unit>()
+        val lateRollback = LateResultImpl<() -> Unit>()
         return atomic(
             action = {
-                val operationResult = try {
-                    op()
-                } catch (e: Exception) {
-                    throw e
-                }
-//                val operationResult = op()
-                rollback.value = operationResult.second
-                when (val sagaResult = operationResult.first) {
-                    is Saga.Result.Success -> sagaResult.value
-                    is Saga.Result.Failure -> fail(sagaResult.reason) // FIXME: we lose nested rollback here
+                val (result, rollback) = op()
+                lateRollback.value = rollback
+                when (result) {
+                    is Saga.Result.Success -> result.value
+                    is Saga.Result.Failure -> throw NestedSagaFailure(result.reason, rollback)
                 }
             },
-            compensateWith = { rollback.value.invoke() }
+            compensateWith = { lateRollback.value.invoke() }
         )
     }
 
@@ -136,17 +136,17 @@ sealed interface SagaExecutionScope {
         get() = (this as LateResultImpl).value
 }
 
-sealed interface SagaActionScope<Success, Failure> : SagaExecutionScope {
+sealed interface SagaActionScope<Success, Failure : Any> : SagaExecutionScope {
     fun fail(reason: Failure): Nothing
 }
 
-private class SagaActionScopeImpl<Success, Failure> : SagaActionScope<Success, Failure> {
+private class SagaActionScopeImpl<Success, Failure : Any> : SagaActionScope<Success, Failure> {
     override fun fail(reason: Failure): Nothing {
-        throw SagaActionFailure(reason as Any)
+        throw SagaActionFailure(reason)
     }
 }
 
-private class SagaActionFailure(val rawReason: Any) : Error(
+private sealed class InternalSagaException(val rawReason: Any) : Error(
     """
         |Saga's action failed and compensation process will trigger. Usage of instances of this class is strictly
         |internal - it's used to differentiate between action's expected failures and unexpected errors. That's why
@@ -154,6 +154,10 @@ private class SagaActionFailure(val rawReason: Any) : Error(
         |a developer to accidentally catch it.
     """.trimMargin().lines().joinToString(" ") { it.trimEnd() }
 )
+
+private class SagaActionFailure(rawReason: Any) : InternalSagaException(rawReason)
+
+private class NestedSagaFailure(rawReason: Any, val rollback: () -> Unit) : InternalSagaException(rawReason)
 
 sealed interface SagaActionRollbackScope : SagaExecutionScope
 

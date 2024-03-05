@@ -26,19 +26,13 @@ class SuspendingSagaTest : FreeSpec({
             }
         }
 
-        val result = saga.execute()
-        println(1)
-        scheduler.advanceTimeBy(500)
-        println(2)
-//        scheduler.runCurrent()
-        println(3)
-        sagaCoContext.cancel("lol")
-//        scheduler.runCurrent()
+        val result = saga.execute().shouldBeInstanceOf<Saga.Result.Success<Job>>().value
 
-        result.shouldBeInstanceOf<Saga.Result.Success<Job>>()
-            .value.also {
-                it.isActive shouldBe false
-                it.isCancelled shouldBe true
-            }
+        scheduler.advanceTimeBy(500)
+        result.isActive shouldBe true
+        result.isCancelled shouldBe false
+        sagaCoContext.cancel("lol")
+        result.isActive shouldBe false
+        result.isCancelled shouldBe true
     }
 })

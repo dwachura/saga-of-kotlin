@@ -1,17 +1,18 @@
 package io.dwsoft.sok.coroutines
 
+import io.dwsoft.sok.ResultWithSuspendingRollback
 import io.dwsoft.sok.ReversibleOp
 import kotlinx.coroutines.runBlocking
 
-class SuspendingOp<T>(
-    op: suspend () -> T,
+class SuspendingReversibleOp<T>(
+    private val op: suspend () -> T,
     private val rollback: suspend () -> Unit
-) : ReversibleOp.SuspendingOld<T>, suspend () -> T by op {
-    override suspend fun revert() = rollback()
+) : ReversibleOp.Suspending<T> {
+    override suspend fun invoke(): ResultWithSuspendingRollback<T> = op() to rollback
 
-    override fun toNonSuspending(): ReversibleOp.NonSuspendingOld<T> =
-        ReversibleOp.NonSuspendingOld(
-            op = { runBlocking { invoke() } },
-            rollback = { runBlocking { revert() } },
+    override fun toNonSuspending(): ReversibleOp.NonSuspending<T> =
+        ReversibleOp.NonSuspending(
+            op = { runBlocking { op() } },
+            rollback = { runBlocking { rollback() } },
         )
 }
