@@ -13,6 +13,7 @@ testlogger {
 
 kotlin {
     jvmToolchain(11)
+    enableContextReceivers()
 }
 
 repositories {

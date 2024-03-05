@@ -4,15 +4,15 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.throwables.shouldThrowAny
 import io.kotest.core.spec.style.FreeSpec
 import io.kotest.matchers.shouldBe
-import io.kotest.matchers.throwable.shouldHaveMessage
 import io.kotest.matchers.types.shouldBeInstanceOf
-import io.kotest.matchers.types.shouldBeTypeOf
 import io.mockk.spyk
 import io.mockk.verify
+import io.mockk.verifyAll
+import io.mockk.verifyOrder
 import java.util.concurrent.Executors
 
 // TODO: maybe group test cases by execution and rollback phases
-class SagaTest : FreeSpec({
+class NonSuspendingSagaTest : FreeSpec({
     "Action results are usable in..." - {
         "...other actions" {
             val recorder: (Int) -> Unit = spyk()
@@ -65,7 +65,7 @@ class SagaTest : FreeSpec({
 
             val result = saga.execute()
 
-            result.shouldBeInstanceOf<Saga.Result.Compensated<*>>()
+            result.shouldBeInstanceOf<Saga.Result.Failure<*>>()
                 .reason shouldBe expectedReason
             verify(exactly = 1) { expectedRollback(any(), 1) }
             verify(exactly = 1) { expectedRollback(any(), 2) }
@@ -83,7 +83,7 @@ class SagaTest : FreeSpec({
 
             val result = saga.execute()
 
-            result.shouldBeInstanceOf<Saga.Result.Compensated<*>>()
+            result.shouldBeInstanceOf<Saga.Result.Failure<*>>()
                 .reason shouldBe expectedReason
             verify(exactly = 1) { rollback(any(), 1) }
             verify(exactly = 1) { rollback(any(), 2) }
@@ -105,7 +105,7 @@ class SagaTest : FreeSpec({
             result { v1.value + v2.value }
         }.execute()
 
-        result.shouldBeInstanceOf<Saga.Result.Completed<Int>>()
+        result.shouldBeInstanceOf<Saga.Result.Success<Int>>()
             .value shouldBe 3
     }
 
@@ -171,7 +171,7 @@ class SagaTest : FreeSpec({
                 result { v.value }
             }.execute()
 
-            result.shouldBeInstanceOf<Saga.Result.Completed<Int>>()
+            result.shouldBeInstanceOf<Saga.Result.Success<Int>>()
                 .value shouldBe 1
         }
 
@@ -188,7 +188,7 @@ class SagaTest : FreeSpec({
                 result { fail(Unit) }
             }.execute()
 
-            result.shouldBeInstanceOf<Saga.Result.Compensated<Unit>>()
+            result.shouldBeInstanceOf<Saga.Result.Failure<Unit>>()
             verify(exactly = 1) { recorder(any(), 1) }
             verify(exactly = 1) { recorder(any(), 2) }
         }
@@ -204,13 +204,16 @@ class SagaTest : FreeSpec({
             val result = saga<Int, String> {
                 atomic({ 1 }, compensateWith = recorder)
                 val v = atomic(saga)
+                atomic({ 3 }, compensateWith = recorder)
                 result { v.value }
             }.execute()
 
-            result.shouldBeInstanceOf<Saga.Result.Compensated<String>>()
+            result.shouldBeInstanceOf<Saga.Result.Failure<String>>()
                 .reason shouldBe "Nested"
-            verify(exactly = 1) { recorder(any(), 1) }
-            verify(exactly = 1) { recorder(any(), 2) }
+            verifyOrder {
+                recorder(any(), 1)
+                recorder(any(), 2)
+            }
             verify(exactly = 0) { recorder(any(), more(2)) }
         }
 
@@ -280,13 +283,6 @@ class SagaTest : FreeSpec({
             }
         }
     }
-
-    "test" {
-        saga<Unit, Nothing> {
-            result {}
-            result {}
-        }.execute()
-    }
 })
 
 class SagaSamples : FreeSpec({
@@ -308,7 +304,7 @@ class SagaSamples : FreeSpec({
             result { result.value.also(::println) }
         }.execute()
 
-        result.shouldBeInstanceOf<Saga.Result.Completed<String>>()
+        result.shouldBeInstanceOf<Saga.Result.Success<String>>()
             .value shouldBe "Hello world"
     }
 })

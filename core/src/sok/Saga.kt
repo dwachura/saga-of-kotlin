@@ -19,10 +19,10 @@ sealed interface Saga<Success, out Failure> {
 
     sealed interface Result<out Success, out Failure> {
         @JvmInline
-        value class Completed<Success>(val value: Success) : Result<Success, Nothing>
+        value class Success<Success>(val value: Success) : Result<Success, Nothing>
 
         @JvmInline
-        value class Compensated<Failure>(val reason: Failure) : Result<Nothing, Failure>
+        value class Failure<Failure>(val reason: Failure) : Result<Nothing, Failure>
     }
 }
 

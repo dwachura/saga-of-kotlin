@@ -2,8 +2,8 @@ package io.dwsoft.sok
 
 import io.github.oshai.kotlinlogging.KotlinLogging
 import java.util.concurrent.CompletableFuture
-import kotlin.math.log
 
+// FIXME: order of rollbacks should be from the latest one - change tests and fix implementation
 fun <Success, Failure> saga(
     configuration: SagaBuildingScope<Success, Failure>.() -> SagaResult<Success>
 ): Saga.NonSuspending<Success, Failure> =
@@ -13,40 +13,46 @@ fun <Success, Failure> saga(
         object : Saga.NonSuspending<Success, Failure> {
             private val actions = buildingScope.actions
 
-            override fun execute(): Saga.Result<Success, Failure> {
-                val rollbacks = mutableListOf<() -> Unit>()
-                return runCatching {
-                    actions.forEach {
-                        it.invoke()
-                        rollbacks += it::revert
-                    }
-                    val sagaResult = finalizer() as SagaResultImpl<Success>
-                    Saga.Result.Completed(sagaResult.value.get())
-                }.recoverCatching {
-                    when (it) {
-                        is SagaActionFailure -> Saga.Result.Compensated(it.reason)
-                        is SagaException -> throw it.cause ?: it
-                        else -> throw it
-                    }
-                }.mapCatching { sagaResult ->
-                    if (sagaResult is Saga.Result.Compensated) rollbacks.forEach { it.invoke() }
-                    sagaResult
+            override fun execute(): Saga.Result<Success, Failure> =
+                runCatching {
+                    executeActions()
+                }.mapCatching { (result, rollbacks) ->
+                    if (result is Saga.Result.Failure) rollbacks.forEach { it.invoke() }
+                    result
                 }.recoverCatching {
                     throw SagaException(it)
                 }.getOrThrow()
+
+            private fun executeActions(): SagaActionPhaseResult<Success, Failure> {
+                val rollbacks = mutableListOf<() -> Unit>()
+                return runCatching {
+                    actions.forEach { rollbacks += it.invoke().second }
+                    val sagaResult = finalizer() as SagaResultImpl<Success>
+                    Saga.Result.Success(sagaResult.value)
+                }.recoverCatching {
+                    when (it) {
+                        is SagaActionFailure -> Saga.Result.Failure(it.reason)
+                        is SagaException -> throw it.cause ?: it
+                        else -> throw it
+                    }
+                }.getOrThrow() to rollbacks
             }
 
-            override fun toReversibleOp(): ReversibleOp.NonSuspending<Saga.Result<Success, Failure>> =
-                ReversibleOp.NonSuspending(
-                    op = { execute() },
-                    rollback = { actions.forEach { it.revert() } }
+            override fun toReversibleOp(): ReversibleOp.NonSuspending<Saga.Result<Success, Failure>> {
+                val rollbacks = LateResultImpl<List<() -> Unit>>()
+                return ReversibleOp.NonSuspending(
+                    op = { executeActions().also { rollbacks.value = it.second }.first },
+                    rollback = { rollbacks.value.forEach { it.invoke() } },
                 )
+            }
 
             private val SagaActionFailure.reason: Failure
                 @Suppress("UNCHECKED_CAST")
                 get() = rawReason as Failure
         }
     }
+
+private typealias SagaActionPhaseResult<Success, Failure> = Pair<Saga.Result<Success, Failure>, List<() -> Unit>>
 
 @SagaDsl
 sealed interface SagaBuildingScope<Success, Failure> {
@@ -72,11 +78,11 @@ private class SagaBuildingScopeImpl<Success, Failure> : SagaBuildingScope<Succes
     ): LateResult<T> {
         val lateResult = LateResultImpl<T>()
         actions += ReversibleOp.NonSuspending({
-            Saga.Result.Completed(
+            Saga.Result.Success(
                 SagaActionScopeImpl<T, Failure>().action()
-                    .also { lateResult.value.complete(it) }
+                    .also { lateResult.value = it }
             )
-        }, { SagaActionRollbackScopeImpl.compensateWith(lateResult.value.get()) })
+        }, { SagaActionRollbackScopeImpl.compensateWith(lateResult.value) })
         return lateResult
     }
 
@@ -92,9 +98,7 @@ private class SagaBuildingScopeImpl<Success, Failure> : SagaBuildingScope<Succes
         }
         val sagaResult = SagaResultImpl<Success>()
         finalizer = {
-            sagaResult.also {
-                it.value.complete(action.execute())
-            }
+            sagaResult.also { it.value = action.execute() }
         }
         return sagaResult
     }
@@ -104,14 +108,22 @@ private class SagaBuildingScopeImpl<Success, Failure> : SagaBuildingScope<Succes
             is Saga.NonSuspending -> saga.toReversibleOp()
             is Saga.Suspending -> saga.toReversibleOp().toNonSuspending()
         }
+        val rollback = LateResultImpl<() -> Unit>()
         return atomic(
             action = {
-                when (val sagaResult = op()) {
-                    is Saga.Result.Completed -> sagaResult.value
-                    is Saga.Result.Compensated -> fail(sagaResult.reason)
+                val operationResult = try {
+                    op()
+                } catch (e: Exception) {
+                    throw e
+                }
+//                val operationResult = op()
+                rollback.value = operationResult.second
+                when (val sagaResult = operationResult.first) {
+                    is Saga.Result.Success -> sagaResult.value
+                    is Saga.Result.Failure -> fail(sagaResult.reason) // FIXME: we lose nested rollback here
                 }
             },
-            compensateWith = { op.revert() }
+            compensateWith = { rollback.value.invoke() }
         )
     }
 
@@ -121,7 +133,7 @@ private class SagaBuildingScopeImpl<Success, Failure> : SagaBuildingScope<Succes
 @SagaDsl
 sealed interface SagaExecutionScope {
     val <T> LateResult<T>.value: T
-        get() = (this as LateResultImpl).value.get()
+        get() = (this as LateResultImpl).value
 }
 
 sealed interface SagaActionScope<Success, Failure> : SagaExecutionScope {
@@ -151,14 +163,22 @@ private data object SagaActionRollbackScopeImpl : SagaActionRollbackScope
 sealed interface LateResult<T>
 
 private class LateResultImpl<T> : LateResult<T> {
-    val value = CompletableFuture<T>()
+    var value: T
+        get() = _value.get()
+        set(value) { _value = CompletableFuture<T>().also { it.complete(value) } }
+
+    private lateinit var _value: CompletableFuture<T>
 }
 
 @SagaDsl
 sealed interface SagaResult<T>
 
 private class SagaResultImpl<T> : SagaResult<T> {
-    val value = CompletableFuture<T>()
+    var value: T
+        get() = _value.get()
+        set(value) { _value = CompletableFuture<T>().also { it.complete(value) } }
+
+    private lateinit var _value: CompletableFuture<T>
 }
 
 @DslMarker
