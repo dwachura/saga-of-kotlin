@@ -18,17 +18,18 @@ fun <Success, Failure : Any> saga(
                 runCatching {
                     executeActions()
                 }.mapCatching { (result, rollbacks) ->
-                    if (result is Saga.Result.Failure) rollbacks.forEach { it.invoke() }
+                    if (result is Saga.Result.Failure) rollbacks.reversed().forEach { it.invoke() }
                     result
                 }.recoverCatching {
                     throw SagaException(it)
                 }.getOrThrow()
 
             private fun executeActions(): SagaActionPhaseResult<Success, Failure> {
+                // fixme: not list - use stack or linked list (something that can be inverted more efficient)
                 val rollbacks = mutableListOf<() -> Unit>()
                 return runCatching {
                     actions.forEach { rollbacks += it.invoke().second }
-                    val sagaResult = finalizer() as SagaResultImpl<Success>
+                    val sagaResult = finalizer().revealed()
                     Saga.Result.Success(sagaResult.value)
                 }.recoverCatching {
                     when (it) {
@@ -47,7 +48,7 @@ fun <Success, Failure : Any> saga(
                 val rollbacks = LateResultImpl<List<() -> Unit>>()
                 return ReversibleOp.NonSuspending(
                     op = { executeActions().also { rollbacks.value = it.second }.first },
-                    rollback = { rollbacks.value.forEach { it.invoke() } },
+                    rollback = { rollbacks.value.reversed().forEach { it.invoke() } },
                 )
             }
 
@@ -133,7 +134,7 @@ private class SagaBuildingScopeImpl<Success, Failure : Any> : SagaBuildingScope<
 @SagaDsl
 sealed interface SagaExecutionScope {
     val <T> LateResult<T>.value: T
-        get() = (this as LateResultImpl).value
+        get() = revealed().value
 }
 
 sealed interface SagaActionScope<Success, Failure : Any> : SagaExecutionScope {
@@ -166,16 +167,22 @@ private data object SagaActionRollbackScopeImpl : SagaActionRollbackScope
 @SagaDsl
 sealed interface LateResult<T>
 
+private fun <T> LateResult<T>.revealed(): LateResultImpl<T> = this as LateResultImpl<T>
+
 private class LateResultImpl<T> : LateResult<T> {
     var value: T
         get() = _value.get()
         set(value) { _value = CompletableFuture<T>().also { it.complete(value) } }
 
     private lateinit var _value: CompletableFuture<T>
+
+    fun isAvailable(): Boolean = _value.isDone
 }
 
 @SagaDsl
 sealed interface SagaResult<T>
+
+private fun <T> SagaResult<T>.revealed(): SagaResultImpl<T> = this as SagaResultImpl<T>
 
 private class SagaResultImpl<T> : SagaResult<T> {
     var value: T
@@ -187,3 +194,6 @@ private class SagaResultImpl<T> : SagaResult<T> {
 
 @DslMarker
 annotation class SagaDsl
+
+private typealias SagaActionWithLateResult<Success, Failure> =
+        Pair<ReversibleOp.NonSuspending<Saga.Result<Success, Failure>>, LateResult<Success>>
