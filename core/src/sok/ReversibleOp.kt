@@ -5,7 +5,7 @@ sealed interface ReversibleOp<T> {
         companion object {
             operator fun <T> invoke(op: () -> T, rollback: () -> Unit): NonSuspending<T> =
                 object : NonSuspending<T> {
-                    override fun invoke(): ResultWithRollback<T> = op() to rollback
+                    override fun invoke(): ResultWithRollback<T> = ResultWithRollback(op(), rollback)
                 }
         }
     }
@@ -15,8 +15,10 @@ sealed interface ReversibleOp<T> {
     }
 }
 
+data class ResultWithRollback<T>(val result: T, val rollback: () -> Unit)
+
 typealias ReversibleFunction<T> = () -> ResultWithRollback<T>
-typealias ResultWithRollback<T> = Pair<T, () -> Unit>
+
+data class ResultWithSuspendingRollback<T>(val result: T, val rollback: () -> Unit)
 
 typealias SuspendingReversibleFunction<T> = suspend () -> ResultWithSuspendingRollback<T>
-typealias ResultWithSuspendingRollback<T> = Pair<T, suspend () -> Unit>

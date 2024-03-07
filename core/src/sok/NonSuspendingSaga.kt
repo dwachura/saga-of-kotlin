@@ -28,7 +28,7 @@ fun <Success, Failure : Any> saga(
                 // fixme: not list - use stack or linked list (something that can be inverted more efficient)
                 val rollbacks = mutableListOf<() -> Unit>()
                 return runCatching {
-                    actions.forEach { rollbacks += it.invoke().second }
+                    val resultsWithRollback = actions.associate { it.second to it.first().rollback }
                     val sagaResult = finalizer().revealed()
                     Saga.Result.Success(sagaResult.value)
                 }.recoverCatching {
@@ -73,7 +73,8 @@ sealed interface SagaBuildingScope<Success, Failure : Any> {
 }
 
 private class SagaBuildingScopeImpl<Success, Failure : Any> : SagaBuildingScope<Success, Failure> {
-    val actions = mutableListOf<ReversibleOp.NonSuspending<Saga.Result<*, Failure>>>()
+//    val actions = mutableListOf<ReversibleOp.NonSuspending<Saga.Result<*, Failure>>>()
+    val actions = mutableListOf<SagaActionWithLateResult<*, Failure>>()
     lateinit var finalizer: () -> SagaResult<Success>
 
     private val logger = KotlinLogging.logger {}
@@ -83,12 +84,14 @@ private class SagaBuildingScopeImpl<Success, Failure : Any> : SagaBuildingScope<
         compensateWith: SagaActionRollbackScope.(actionResult: T) -> Unit
     ): LateResult<T> {
         val lateResult = LateResultImpl<T>()
-        actions += ReversibleOp.NonSuspending({
+        val reversibleOp = ReversibleOp.NonSuspending<Saga.Result<*, Failure>>({
             Saga.Result.Success(
                 SagaActionScopeImpl<T, Failure>().action()
                     .also { lateResult.value = it }
             )
         }, { SagaActionRollbackScopeImpl.compensateWith(lateResult.value) })
+//        actions += reversibleOp
+        actions += (reversibleOp to lateResult)
         return lateResult
     }
 
@@ -176,7 +179,19 @@ private class LateResultImpl<T> : LateResult<T> {
 
     private lateinit var _value: CompletableFuture<T>
 
-    fun isAvailable(): Boolean = _value.isDone
+    val status: Status
+        get() = when {
+            !_value.isDone -> Status.Processing
+            _value.isCompletedExceptionally && !_value.isCancelled -> Status.Failure
+            _value.isCancelled -> Status.Cancelled
+            else -> Status.Success
+        }
+
+    fun isAvailable(): Boolean = status == Status.Processing
+
+    enum class Status {
+        Processing, Cancelled, Failure, Success
+    }
 }
 
 @SagaDsl
@@ -197,3 +212,25 @@ annotation class SagaDsl
 
 private typealias SagaActionWithLateResult<Success, Failure> =
         Pair<ReversibleOp.NonSuspending<Saga.Result<Success, Failure>>, LateResult<Success>>
+
+private fun waitCompletion(resultsWithRollbacks: Map<LateResult<*>, () -> Unit>) {
+    if (resultsWithRollbacks.isEmpty()) return
+    var active = resultsWithRollbacks.mapKeys { it.key.revealed() }.toList()
+    val rollbacks = mutableListOf<() -> Unit>()
+    while (active.isNotEmpty()) {
+        active.groupBy { it.first.status }
+            .also {
+                active = it[LateResultImpl.Status.Processing]?.takeIf { it.isNotEmpty() }.orEmpty()
+                it[LateResultImpl.Status.Success]?.also { rollbacks += it.map { it.second } }
+                it[LateResultImpl.Status.Cancelled]?.also { rollbacks += it.map { it.second } }
+            }
+            .map { (status, results) ->
+                when (status) {
+                    LateResultImpl.Status.Processing -> active = results.takeIf { it.isNotEmpty() }.orEmpty()
+                    LateResultImpl.Status.Cancelled -> TODO()
+                    LateResultImpl.Status.Failure -> TODO()
+                    LateResultImpl.Status.Success -> TODO()
+                }
+            }
+    }
+}
