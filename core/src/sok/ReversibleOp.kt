@@ -19,6 +19,6 @@ data class ResultWithRollback<T>(val result: T, val rollback: () -> Unit)
 
 typealias ReversibleFunction<T> = () -> ResultWithRollback<T>
 
-data class ResultWithSuspendingRollback<T>(val result: T, val rollback: () -> Unit)
+data class ResultWithSuspendingRollback<T>(val result: T, val rollback: suspend () -> Unit)
 
 typealias SuspendingReversibleFunction<T> = suspend () -> ResultWithSuspendingRollback<T>

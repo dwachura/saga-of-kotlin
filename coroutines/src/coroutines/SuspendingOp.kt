@@ -8,7 +8,8 @@ class SuspendingReversibleOp<T>(
     private val op: suspend () -> T,
     private val rollback: suspend () -> Unit
 ) : ReversibleOp.Suspending<T> {
-    override suspend fun invoke(): ResultWithSuspendingRollback<T> = op() to rollback
+    override suspend fun invoke(): ResultWithSuspendingRollback<T> =
+        ResultWithSuspendingRollback(op(), rollback)
 
     override fun toNonSuspending(): ReversibleOp.NonSuspending<T> =
         ReversibleOp.NonSuspending(

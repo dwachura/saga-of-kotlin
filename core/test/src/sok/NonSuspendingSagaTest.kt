@@ -279,9 +279,12 @@ class NonSuspendingSagaTest : FreeSpec({
         }
     }
 
+    // TODO: check behavior of compensation of parallel actions of
+    //  nested saga when the completes only partially
     "Parallel actions" - {
-        // TODO: check behavior of compensation of parallel actions of
-        //  nested saga when the completes only partially
+
+        // todo: to make it works we need to have separate way to define async atomics,
+        //  e.g. atomicAsync({}, {})
         "Only completely finished actions are compensated" {
             val rollback = RollbackRecorder<Future<Int>>()
             val result = saga<Int, String> {

@@ -2,6 +2,7 @@ package io.dwsoft.sok
 
 import io.github.oshai.kotlinlogging.KotlinLogging
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ExecutionException
 
 // TODO: debug logs + tracking of saga nesting
 // FIXME: order of rollbacks should be from the latest one - change tests and fix implementation
@@ -25,19 +26,40 @@ fun <Success, Failure : Any> saga(
                 }.getOrThrow()
 
             private fun executeActions(): SagaActionPhaseResult<Success, Failure> {
-                // fixme: not list - use stack or linked list (something that can be inverted more efficient)
                 val rollbacks = mutableListOf<() -> Unit>()
                 return runCatching {
-                    val resultsWithRollback = actions.associate { it.second to it.first().rollback }
+//                    actions.forEach { rollbacks += it.first().rollback }
+
+                    var failedOn: Pair<LateResult<*>, () -> Unit>? = null
+                    val resultsWithRollback = actions.map { it.second to it.first() }
+                        .takeWhile { (lateResult, resultWithRollback) ->
+                            val shouldContinue = lateResult.revealed().status !in
+                                    listOf(LateResultImpl.Status.Failure, LateResultImpl.Status.Error)
+                            if (!shouldContinue) {
+                                failedOn = lateResult to resultWithRollback.rollback
+                            }
+                            shouldContinue
+                        }.associate { it.first to it.second.rollback }
+                        .let {
+                            if (failedOn != null) it.toMutableMap() + failedOn!! else it
+                        }
+//
+//                    val resultsWithRollback = actions.associate {
+//                        // fixme: after recent change exceptions are hold into completable future, so fail-fast is lost
+//                        val actionResult = it.first()
+//                        val lateResult = it.second.revealed()
+//                        if (lateResult.isAvailable() && lateResult.status in
+//                            listOf(LateResultImpl.Status.Failure, LateResultImpl.Status.Error)) {
+//
+//                        }
+//                        it.second to actionResult.rollback
+//                    }
+                    waitCompletion(resultsWithRollback, rollbacks)
                     val sagaResult = finalizer().revealed()
                     Saga.Result.Success(sagaResult.value)
                 }.recoverCatching {
                     when (it) {
-                        is SagaActionFailure -> Saga.Result.Failure(it.reason)
-                        is NestedSagaFailure -> {
-                            rollbacks += it.rollback
-                            Saga.Result.Failure(it.reason)
-                        }
+                        is InternalSagaException -> Saga.Result.Failure(it.reason)
                         is SagaException -> throw it.cause ?: it
                         else -> throw it
                     }
@@ -86,8 +108,12 @@ private class SagaBuildingScopeImpl<Success, Failure : Any> : SagaBuildingScope<
         val lateResult = LateResultImpl<T>()
         val reversibleOp = ReversibleOp.NonSuspending<Saga.Result<*, Failure>>({
             Saga.Result.Success(
-                SagaActionScopeImpl<T, Failure>().action()
-                    .also { lateResult.value = it }
+                runCatching {
+                    SagaActionScopeImpl<T, Failure>().action()
+                }.fold(
+                    onSuccess = { lateResult.value = it },
+                    onFailure = { lateResult.completeExceptionally(it) }
+                )
             )
         }, { SagaActionRollbackScopeImpl.compensateWith(lateResult.value) })
 //        actions += reversibleOp
@@ -175,22 +201,37 @@ private fun <T> LateResult<T>.revealed(): LateResultImpl<T> = this as LateResult
 private class LateResultImpl<T> : LateResult<T> {
     var value: T
         get() = _value.get()
-        set(value) { _value = CompletableFuture<T>().also { it.complete(value) } }
+        set(value) { _value.complete(value) }
 
-    private lateinit var _value: CompletableFuture<T>
+    private val _value: CompletableFuture<T> = CompletableFuture<T>()
 
     val status: Status
         get() = when {
             !_value.isDone -> Status.Processing
-            _value.isCompletedExceptionally && !_value.isCancelled -> Status.Failure
             _value.isCancelled -> Status.Cancelled
+            _value.isCompletedExceptionally -> {
+                val exception = exception!!
+                when {
+                    exception is InternalSagaException -> Status.Failure
+                    else -> Status.Error
+                }
+            }
             else -> Status.Success
         }
 
     fun isAvailable(): Boolean = status == Status.Processing
 
+    val exception: Throwable?
+        get() = runCatching { _value.get() }.exceptionOrNull()
+            ?.let { if (it is ExecutionException) it.cause else it }
+
+    fun cancel(): Boolean = _value.cancel(true)
+
+    fun completeExceptionally(throwable: Throwable?): Boolean =
+        _value.completeExceptionally(throwable)
+
     enum class Status {
-        Processing, Cancelled, Failure, Success
+        Processing, Cancelled, Failure, Success, Error
     }
 }
 
@@ -213,23 +254,36 @@ annotation class SagaDsl
 private typealias SagaActionWithLateResult<Success, Failure> =
         Pair<ReversibleOp.NonSuspending<Saga.Result<Success, Failure>>, LateResult<Success>>
 
-private fun waitCompletion(resultsWithRollbacks: Map<LateResult<*>, () -> Unit>) {
+private fun waitCompletion(
+    resultsWithRollbacks: Map<LateResult<*>, () -> Unit>,
+    rollbackStore: MutableList<() -> Unit>,
+) {
     if (resultsWithRollbacks.isEmpty()) return
     var active = resultsWithRollbacks.mapKeys { it.key.revealed() }.toList()
-    val rollbacks = mutableListOf<() -> Unit>()
     while (active.isNotEmpty()) {
         active.groupBy { it.first.status }
-            .also {
-                active = it[LateResultImpl.Status.Processing]?.takeIf { it.isNotEmpty() }.orEmpty()
-                it[LateResultImpl.Status.Success]?.also { rollbacks += it.map { it.second } }
-                it[LateResultImpl.Status.Cancelled]?.also { rollbacks += it.map { it.second } }
-            }
-            .map { (status, results) ->
-                when (status) {
-                    LateResultImpl.Status.Processing -> active = results.takeIf { it.isNotEmpty() }.orEmpty()
-                    LateResultImpl.Status.Cancelled -> TODO()
-                    LateResultImpl.Status.Failure -> TODO()
-                    LateResultImpl.Status.Success -> TODO()
+            .also { results ->
+                active = results[LateResultImpl.Status.Processing]?.takeIf { it.isNotEmpty() }.orEmpty()
+                val (success, cancelled, failed, error) = listOf(
+                    results[LateResultImpl.Status.Success],
+                    results[LateResultImpl.Status.Cancelled],
+                    results[LateResultImpl.Status.Failure],
+                    results[LateResultImpl.Status.Error],
+                ).map { it.orEmpty() }
+                val unsuccessful = listOf(cancelled, failed, error)
+                val nestedRollbacks = failed.mapNotNull { (it.first.exception as? NestedSagaFailure)?.rollback }
+                rollbackStore += (success.map { it.second } + nestedRollbacks)
+                val shouldCancelActive = unsuccessful.any { it.isNotEmpty() }
+                if (shouldCancelActive) {
+                    active.forEach {
+                        if (!it.first.cancel()) rollbackStore += it.second
+                    }
+                    active = emptyList()
+                }
+                when {
+                    error.isNotEmpty() -> throw error.first().first.exception!!
+                    cancelled.isNotEmpty() -> throw cancelled.first().first.exception!!
+                    failed.isNotEmpty() -> throw failed.first().first.exception!!
                 }
             }
     }
