@@ -1,7 +1,7 @@
 package io.dwsoft.sok
 
-sealed interface ReversibleOp<T> {
-    interface NonSuspending<T> : ReversibleOp<T>, ReversibleFunction<T> {
+sealed interface ReversibleOp<out T> {
+    interface NonSuspending<out T> : ReversibleOp<T>, ReversibleFunction<T> {
         companion object {
             operator fun <T> invoke(op: () -> T, rollback: () -> Unit): NonSuspending<T> =
                 object : NonSuspending<T> {
@@ -10,15 +10,15 @@ sealed interface ReversibleOp<T> {
         }
     }
 
-    interface Suspending<T> : ReversibleOp<T>, SuspendingReversibleFunction<T> {
+    interface Suspending<out T> : ReversibleOp<T>, SuspendingReversibleFunction<T> {
         fun toNonSuspending(): NonSuspending<T>
     }
 }
 
-data class ResultWithRollback<T>(val result: T, val rollback: () -> Unit)
+data class ResultWithRollback<out T>(val result: T, val rollback: () -> Unit)
 
 typealias ReversibleFunction<T> = () -> ResultWithRollback<T>
 
-data class ResultWithSuspendingRollback<T>(val result: T, val rollback: suspend () -> Unit)
+data class ResultWithSuspendingRollback<out T>(val result: T, val rollback: suspend () -> Unit)
 
 typealias SuspendingReversibleFunction<T> = suspend () -> ResultWithSuspendingRollback<T>

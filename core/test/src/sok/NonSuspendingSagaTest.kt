@@ -4,16 +4,19 @@ import io.kotest.assertions.asClue
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.throwables.shouldThrowAny
 import io.kotest.core.spec.style.FreeSpec
-import io.kotest.matchers.nulls.shouldNotBeNull
+import io.kotest.matchers.comparables.shouldNotBeGreaterThan
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
-import io.mockk.Matcher
 import io.mockk.spyk
 import io.mockk.verify
 import io.mockk.verifySequence
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import kotlin.reflect.KClass
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.measureTimedValue
 
 // TODO: maybe group test cases by execution and rollback phases
 class NonSuspendingSagaTest : FreeSpec({
@@ -198,7 +201,7 @@ class NonSuspendingSagaTest : FreeSpec({
             val rollback = RollbackRecorder<Int>()
             val saga = saga<Int, String> {
                 val v1 = atomic({ 2 }, compensateWith = rollback)
-                val v2 = atomic({ fail("Nested") }, compensateWith = rollback)
+                val v2 = atomic({ fail("Test") }, compensateWith = rollback)
                 result { v1.value + v2.value }
             }
 
@@ -210,7 +213,7 @@ class NonSuspendingSagaTest : FreeSpec({
             }.execute()
 
             result.shouldBeInstanceOf<Saga.Result.Failure<String>>()
-                .reason shouldBe "Nested"
+                .reason shouldBe "Test"
             rollback.shouldBeCalledWith(2, 1)
         }
 
@@ -279,68 +282,48 @@ class NonSuspendingSagaTest : FreeSpec({
         }
     }
 
-    // TODO: check behavior of compensation of parallel actions of
+    // TODO:
+    //  * check behavior of compensation of parallel actions of
     //  nested saga when the completes only partially
+    //  * what happens when failed action cancels another and the later fails during this -
+    //  does cancel() returns false? Is rollback of such action skipped (as it should)?
     "Parallel actions" - {
+        "Async actions should be run in parallel" {
+            val saga = saga<Int, Nothing> {
+                val pool = Executors.newFixedThreadPool(3)
+                val v1 = asyncAtomic({ pool.delayed(0.1.seconds) { 1 } }, compensateWith = {})
+                val v2 = asyncAtomic({ pool.delayed(0.1.seconds) { 2 } }, compensateWith = {})
+                val v3 = asyncAtomic({ pool.delayed(0.1.seconds) { 3 } }, compensateWith = {})
+                result { listOf(v1.value, v2.value, v3.value).sum() }
+            }
 
-        // todo: to make it works we need to have separate way to define async atomics,
-        //  e.g. atomicAsync({}, {})
+            val (result, duration) = measureTimedValue { saga.execute() }
+
+            result.shouldBeInstanceOf<Saga.Result.Success<Int>>()
+                .value shouldBe 6
+            duration.shouldNotBeGreaterThan(0.15.seconds)
+        }
+
         "Only completely finished actions are compensated" {
-            val rollback = RollbackRecorder<Future<Int>>()
+            val rollback = RollbackRecorder<Int>()
             val result = saga<Int, String> {
                 val pool = Executors.newFixedThreadPool(3)
-                val v1 = atomic({
-                    pool.submit<Int> {
-                        Thread.sleep(300)
-                        1
-                    }
+                val v1 = asyncAtomic({
+                    pool.delayed(0.1.seconds) { 1 }
                 }, compensateWith = rollback)
-                val v2 = atomic({
-                    pool.submit<Int> {
-                        Thread.sleep(600)
-                        2
-                    }
+                val v2 = asyncAtomic({
+                    pool.delayed(0.2.seconds) { 2 }
                 }, compensateWith = rollback)
-                val v3 = atomic({
-                    pool.submit<Int> {
-                        Thread.sleep(450)
-                        fail("Test")
-                    }
+                val v3 = asyncAtomic({
+                    pool.delayed(0.15.seconds) { fail("Test") }
                 }, compensateWith = rollback)
-                result {
-                    Thread.sleep(700)
-                    listOf(v1.value, v2.value, v3.value).sumOf { it.get() }
-                }
+                result { listOf(v1.value, v2.value, v3.value).sum() }
             }.execute()
 
             result.shouldBeInstanceOf<Saga.Result.Failure<String>>()
                 .reason shouldBe "Test"
-            rollback.shouldBeCalledWith(1) { it.get() }
+            rollback.shouldBeCalledWith(1)
         }
-    }
-})
-
-class SagaSamples : FreeSpec({
-    "Parallel ops" {
-        val result = saga<String, Nothing> {
-            val pool = Executors.newFixedThreadPool(2)
-            val s1 = atomic({
-                pool.submit<String> {
-                    println("Step 1 started")
-                    Thread.sleep(1000)
-                    "Hello".also { println("Step 1 finished") }
-                }
-            }, compensateWith = {})
-            val result = atomic({
-                println("Step 2 started")
-                val v = s1.value.get()
-                "$v world".also { println("Step 2 finished") }
-            }, compensateWith = {})
-            result { result.value.also(::println) }
-        }.execute()
-
-        result.shouldBeInstanceOf<Saga.Result.Success<String>>()
-            .value shouldBe "Hello world"
     }
 })
 
@@ -351,18 +334,6 @@ private class RollbackRecorder<T : Any> private constructor(
     fun shouldBeCalledWith(vararg args: T) {
         verifySequence {
             args.forEach { rollback.invoke(any(), it) }
-        }
-    }
-
-    fun <T2> shouldBeCalledWith(vararg args: T2, transformer: (T) -> T2) {
-        verifySequence {
-            args.forEach { expected ->
-                rollback.invoke(any(), match(
-                    object : Matcher<T> {
-                        override fun match(arg: T?): Boolean =
-                            transformer(arg.shouldNotBeNull()) == expected
-                    }, argType))
-            }
         }
     }
 
@@ -380,3 +351,14 @@ private class RollbackRecorder<T : Any> private constructor(
             )
     }
 }
+
+private fun <T> ExecutorService.delayed(
+    sleep: Duration,
+    preDelay: () -> Unit = {},
+    f: () -> T
+): Future<T> =
+    submit<T> {
+        preDelay()
+        Thread.sleep(sleep.inWholeMilliseconds)
+        f()
+    }
