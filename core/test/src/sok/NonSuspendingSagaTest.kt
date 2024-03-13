@@ -5,11 +5,13 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.throwables.shouldThrowAny
 import io.kotest.core.spec.style.FreeSpec
 import io.kotest.matchers.comparables.shouldNotBeGreaterThan
+import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
 import io.mockk.spyk
 import io.mockk.verify
 import io.mockk.verifySequence
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
@@ -22,7 +24,7 @@ import kotlin.time.measureTimedValue
 class NonSuspendingSagaTest : FreeSpec({
     "Action results are usable in..." - {
         "...other actions" {
-            val recorder: (Int) -> Unit = spyk()
+            val recorder = Recorder<Int>()
             saga<Unit, Nothing> {
                 val v = atomic({ 1 }, compensateWith = {})
                 atomic({ recorder(v.value) }, compensateWith = {})
@@ -33,7 +35,7 @@ class NonSuspendingSagaTest : FreeSpec({
         }
 
         "...rollbacks" {
-            val recorder: (Int) -> Unit = spyk()
+            val recorder = Recorder<Int>()
             saga {
                 val v = atomic({ 1 }, compensateWith = {})
                 atomic({ 2 }, compensateWith = {
@@ -48,7 +50,7 @@ class NonSuspendingSagaTest : FreeSpec({
         }
 
         "...completions" {
-            val recorder: (Int) -> Unit = spyk()
+            val recorder = Recorder<Int>()
             saga<Unit, Nothing> {
                 val v = atomic({ 1 }, compensateWith = {})
                 result { recorder(v.value) }
@@ -291,9 +293,9 @@ class NonSuspendingSagaTest : FreeSpec({
         "Async actions should be run in parallel" {
             val saga = saga<Int, Nothing> {
                 val pool = Executors.newFixedThreadPool(3)
-                val v1 = asyncAtomic({ pool.delayed(0.1.seconds) { 1 } }, compensateWith = {})
-                val v2 = asyncAtomic({ pool.delayed(0.1.seconds) { 2 } }, compensateWith = {})
-                val v3 = asyncAtomic({ pool.delayed(0.1.seconds) { 3 } }, compensateWith = {})
+                val v1 = atomic(asynchronous({ pool.delayed(0.1.seconds) { 1 }.asAsync() }, compensateWith = {}))
+                val v2 = atomic(asynchronous({ pool.delayed(0.1.seconds) { 2 }.asAsync() }, compensateWith = {}))
+                val v3 = atomic(asynchronous({ pool.delayed(0.1.seconds) { 3 }.asAsync() }, compensateWith = {}))
                 result { listOf(v1.value, v2.value, v3.value).sum() }
             }
 
@@ -306,49 +308,109 @@ class NonSuspendingSagaTest : FreeSpec({
 
         "Only completely finished actions are compensated" {
             val rollback = RollbackRecorder<Int>()
+            val pool = Executors.newFixedThreadPool(3)
+            var cancelledFuture: Future<Int>? = null
             val result = saga<Int, String> {
-                val pool = Executors.newFixedThreadPool(3)
-                val v1 = asyncAtomic({
-                    pool.delayed(0.1.seconds) { 1 }
-                }, compensateWith = rollback)
-                val v2 = asyncAtomic({
-                    pool.delayed(0.2.seconds) { 2 }
-                }, compensateWith = rollback)
-                val v3 = asyncAtomic({
-                    pool.delayed(0.15.seconds) { fail("Test") }
-                }, compensateWith = rollback)
+                val v1 = atomic(asynchronous({
+                    pool.delayed(0.1.seconds) { 1 }.asAsync()
+                }, compensateWith = rollback))
+                val v2 = atomic(asynchronous({
+                    pool.delayed(0.2.seconds) { 2 }.also { cancelledFuture = it }.asAsync()
+                }, compensateWith = rollback))
+                val v3 = atomic(asynchronous({
+                    pool.delayed(0.15.seconds) { fail("Test") }.asAsync()
+                }, compensateWith = rollback))
                 result { listOf(v1.value, v2.value, v3.value).sum() }
             }.execute()
 
             result.shouldBeInstanceOf<Saga.Result.Failure<String>>()
                 .reason shouldBe "Test"
             rollback.shouldBeCalledWith(1)
+            cancelledFuture.shouldNotBeNull().isCancelled shouldBe true
+        }
+
+        "Nested sagas are run synchronously" {
+            val recorder = Recorder<Int>()
+            val saga = saga<Unit, Nothing> {
+                atomic(asynchronous({ delayed(0.3.seconds) { recorder(4) }.asAsync() }, {}))
+                atomic(
+                    saga {
+                        atomic(asynchronous({ delayed(0.2.seconds) { recorder(1) }.asAsync() }, {}))
+                        atomic(asynchronous({ delayed(0.21.seconds) { recorder(2) }.asAsync() }, {}))
+                        result {}
+                    }
+                )
+                atomic(asynchronous({ delayed(0.05.seconds) { recorder(3) }.asAsync() }, {}))
+                result {}
+            }
+
+            val (result, duration) = measureTimedValue {
+                saga.execute()
+            }
+
+            result.shouldBeInstanceOf<Saga.Result.Success<Unit>>()
+            recorder.shouldBeCalledWith(1, 2, 3, 4)
+            duration shouldBeBetween 0.3.seconds..0.35.seconds
+        }
+
+        "Cancellation Nested sagas are run synchronously" {
+            val recorder = Recorder<Int>()
+            val saga = saga<Unit, Nothing> {
+                atomic(asynchronous({ delayed(0.3.seconds) { recorder(4) }.asAsync() }, {}))
+                atomic(
+                    saga {
+                        atomic(asynchronous({ delayed(0.2.seconds) { recorder(1) }.asAsync() }, {}))
+                        atomic(asynchronous({ delayed(0.21.seconds) { recorder(2) }.asAsync() }, {}))
+                        result {}
+                    }
+                )
+                atomic(asynchronous({ delayed(0.05.seconds) { recorder(3) }.asAsync() }, {}))
+                result {}
+            }
+
+            val (result, duration) = measureTimedValue {
+                saga.execute()
+            }
+
+            result.shouldBeInstanceOf<Saga.Result.Success<Unit>>()
+            recorder.shouldBeCalledWith(1, 2, 3, 4)
+            duration shouldBeBetween 0.3.seconds..0.35.seconds
         }
     }
 })
 
-private class RollbackRecorder<T : Any> private constructor(
-    private val rollback: SagaActionRollbackScope.(T) -> Unit,
-    private val argType: KClass<T>,
-) : (SagaActionRollbackScope, T) -> Unit by rollback {
+private open class Recorder<T : Any>(
+    private val mock: (T) -> Unit,
+    private val argType: KClass<T>
+) : (T) -> Unit by mock {
     fun shouldBeCalledWith(vararg args: T) {
         verifySequence {
-            args.forEach { rollback.invoke(any(), it) }
+            args.forEach { mock.invoke(it) }
         }
     }
 
     fun shouldNotBeCalled() {
-        "Rollback should not be called".asClue {
-            verify(exactly = 0) { rollback.invoke(any(), any(argType)) }
+        "Function should not be called".asClue {
+            verify(exactly = 0) { mock.invoke(any(argType)) }
         }
     }
 
     companion object {
-        inline operator fun <reified T : Any> invoke(): RollbackRecorder<T> =
-            RollbackRecorder(
-                rollback = spyk<SagaActionRollbackScope.(T) -> Unit>(),
-                argType = T::class,
-            )
+        inline operator fun <reified T : Any> invoke(): Recorder<T> =
+            Recorder(mock = spyk<(T) -> Unit>(), argType = T::class)
+    }
+}
+
+private open class RollbackRecorder<T : Any> private constructor(
+    private val rollback: SagaActionRollbackScope.(T) -> Unit,
+    mock: (T) -> Unit,
+    argType: KClass<T>,
+) : Recorder<T>(mock, argType), (SagaActionRollbackScope, T) -> Unit by rollback {
+    companion object {
+        inline operator fun <reified T : Any> invoke(): RollbackRecorder<T> {
+            val mock = spyk<(T) -> Unit>()
+            return RollbackRecorder(rollback = { mock(it) }, mock = mock, argType = T::class)
+        }
     }
 }
 
@@ -362,3 +424,20 @@ private fun <T> ExecutorService.delayed(
         Thread.sleep(sleep.inWholeMilliseconds)
         f()
     }
+
+private fun <T> delayed(
+    sleep: Duration,
+    preDelay: () -> Unit = {},
+    f: () -> T
+): Future<T> =
+    CompletableFuture.supplyAsync {
+        preDelay()
+        Thread.sleep(sleep.inWholeMilliseconds)
+        f()
+    }
+
+private infix fun Duration.shouldBeBetween(range: ClosedRange<Duration>) {
+    "Duration $this should be in range $range".asClue {
+        (this in range) shouldBe true
+    }
+}

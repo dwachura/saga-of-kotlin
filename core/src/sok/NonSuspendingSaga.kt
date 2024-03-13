@@ -34,7 +34,7 @@ fun <Success, Failure : Any> saga(
                 }.recoverCatching {
                     when (it) {
                         is InternalSagaEvent -> Saga.Result.Failure(it.reason)
-                        is SagaException -> throw it.cause ?: it
+                        is SagaException -> throw it.cause ?: it // fixme: SagaException doesn't need to have a cause
                         else -> throw it
                     }
                 }.getOrThrow() to rollbacks.reversed()
@@ -42,11 +42,9 @@ fun <Success, Failure : Any> saga(
 
             override fun toReversibleOp(): ReversibleOp.NonSuspending<Saga.Result<Success, Failure>> {
                 val future = CompletableFuture<List<() -> Unit>>()
-                val rollbacks = FutureHolder<List<() -> Unit>>()
-                rollbacks.future = future
                 return ReversibleOp.NonSuspending(
                     op = { executeActions().also { future.complete(it.second) }.first },
-                    rollback = { rollbacks.future.get().forEach { it.invoke() } },
+                    rollback = { future.get().forEach { it.invoke() } },
                 )
             }
 
@@ -65,18 +63,27 @@ sealed interface SagaBuildingScope<Success, Failure : Any> {
         compensateWith: SagaActionRollbackScope.(actionResult: T) -> Unit,
     ): LateResult<T>
 
-    fun <T> asyncAtomic(
-        action: SagaActionScope<T, Failure>.() -> Future<T>,
-        compensateWith: SagaActionRollbackScope.(actionResult: T) -> Unit,
-    ): LateResult<T>
+    fun <T> atomic(asynchronous: AsynchronousSagaAction<T, Failure>): LateResult<T>
 
     fun result(action: SagaActionScope<Success, Failure>.() -> Success): SagaResult<Success>
 
     fun <T> atomic(saga: Saga<T, Failure>): LateResult<T>
+
+    data class AsynchronousSagaAction<Success, Failure : Any>(
+        val action: SagaActionScope<Success, Failure>.() -> AsyncCall<Success>,
+        val compensateWith: SagaActionRollbackScope.(actionResult: Success) -> Unit
+    )
 }
 
+fun <T, Failure : Any> SagaBuildingScope<T, Failure>.asynchronous(
+    action: SagaActionScope<T, Failure>.() -> AsyncCall<T>,
+    compensateWith: SagaActionRollbackScope.(actionResult: T) -> Unit,
+): SagaBuildingScope.AsynchronousSagaAction<T, Failure> =
+    SagaBuildingScope.AsynchronousSagaAction(action, compensateWith)
+
+
 private class SagaBuildingScopeImpl<Success, Failure : Any> : SagaBuildingScope<Success, Failure> {
-    val actions = mutableListOf<ReversibleOp.NonSuspending<Future<*>>>()
+    val actions = mutableListOf<ReversibleOp.NonSuspending<AsyncCall<*>>>()
     lateinit var finalizer: () -> SagaResult<Success>
 
     private val logger = KotlinLogging.logger {}
@@ -86,33 +93,34 @@ private class SagaBuildingScopeImpl<Success, Failure : Any> : SagaBuildingScope<
         compensateWith: SagaActionRollbackScope.(actionResult: T) -> Unit
     ): LateResult<T> {
         val future = CompletableFuture<T>()
-        val lateT = FutureHolder<T>()
-        lateT.future = future
+        val lateT = FutureHolder(future)
         val reversibleOp = ReversibleOp.NonSuspending({
             runCatching {
                 SagaActionScopeImpl<T, Failure>().action()
             }.fold(
                 onSuccess = { future.complete(it) },
                 onFailure = {
-                    future.completeExceptionally(if (it is ExecutionException) it.cause else it)
+                    val cause = (it as? ExecutionException)?.cause ?: it
+                    future.completeExceptionally(cause)
                 }
             )
-            future
-        }, { SagaActionRollbackScopeImpl.compensateWith(lateT.future.get()) })
+            return@NonSuspending lateT
+        }, { SagaActionRollbackScopeImpl.compensateWith(lateT.getResult()) })
         actions += reversibleOp
         return lateT
     }
 
-    override fun <T> asyncAtomic(
-        action: SagaActionScope<T, Failure>.() -> Future<T>,
-        compensateWith: SagaActionRollbackScope.(actionResult: T) -> Unit
-    ): LateResult<T> {
-        val lateT = FutureHolder<T>()
+    override fun <T> atomic(asynchronous: SagaBuildingScope.AsynchronousSagaAction<T, Failure>): LateResult<T> {
+        val (action, compensateWith) = asynchronous
+        val lazyFutureHolder: CompletableFuture<FutureHolder<T>> = CompletableFuture()
+        val lateT = FutureHolder.cloneOf(lazyFutureHolder)
         val reversibleOp = ReversibleOp.NonSuspending({
-            SagaActionScopeImpl<T, Failure>().action()
-                .also { lateT.future = it }
-        }, { SagaActionRollbackScopeImpl.compensateWith(lateT.future.get()) })
+            SagaActionScopeImpl<T, Failure>().action().revealed()
+                .also { lazyFutureHolder.complete(it) }
+            lateT
+        }, { SagaActionRollbackScopeImpl.compensateWith(lateT.getResult()) })
         actions += reversibleOp
+        // fixme #1: this is not the same as holder returned from action(). Lazy into FutureHolder might be an issue
         return lateT
     }
 
@@ -139,8 +147,7 @@ private class SagaBuildingScopeImpl<Success, Failure : Any> : SagaBuildingScope<
             is Saga.Suspending -> saga.toReversibleOp().toNonSuspending()
         }
         val future = CompletableFuture<() -> Unit>()
-        val lateRollback = FutureHolder<() -> Unit>()
-        lateRollback.future = future
+        val lateRollback = FutureHolder<() -> Unit>(future)
         return atomic(
             action = {
                 val (result, rollback) = op()
@@ -160,17 +167,19 @@ private class SagaBuildingScopeImpl<Success, Failure : Any> : SagaBuildingScope<
 @SagaDsl
 sealed interface SagaExecutionScope {
     val <T> LateResult<T>.value: T
-        get() = revealed().future.get()
+        get() = revealed().getResult()
 }
 
 sealed interface SagaActionScope<Success, Failure : Any> : SagaExecutionScope {
     fun fail(reason: Failure): Nothing
+
+    fun <T> Future<T>.asAsync(): AsyncCall<T>
 }
 
 private class SagaActionScopeImpl<Success, Failure : Any> : SagaActionScope<Success, Failure> {
-    override fun fail(reason: Failure): Nothing {
-        throw SagaActionFailure(reason)
-    }
+    override fun fail(reason: Failure): Nothing = throw SagaActionFailure(reason)
+
+    override fun <T> Future<T>.asAsync(): AsyncCall<T> = FutureHolder(this)
 }
 
 private sealed class InternalSagaEvent(val context: Any) : Error(
@@ -191,12 +200,47 @@ sealed interface SagaActionRollbackScope : SagaExecutionScope
 private data object SagaActionRollbackScopeImpl : SagaActionRollbackScope
 
 @SagaDsl
-sealed interface LateResult<T>
+sealed interface LateResult<out T>
 
 private fun <T> LateResult<T>.revealed(): FutureHolder<T> = this as FutureHolder<T>
 
-private class FutureHolder<T> : LateResult<T> {
-    lateinit var future: Future<T>
+@SagaDsl
+sealed interface AsyncCall<out T> {
+    fun cancel(): Boolean
+}
+
+private fun <T> AsyncCall<T>.revealed(): FutureHolder<T> = this as FutureHolder<T>
+
+private class FutureHolder<T>(private val lazyFuture: Lazy<Future<T>>) : LateResult<T>, AsyncCall<T> {
+    constructor(future: Future<T>) : this(lazyFuture = lazyOf(future))
+
+    private val future: Future<T>
+        get() = lazyFuture.takeIf { it.isInitialized() }?.value
+            ?: throw UninitializedException
+
+    val isDone: Boolean
+        get() = future.isDone
+
+    fun getResult(): T = future.get()
+
+    override fun cancel(): Boolean = future.cancel(true)
+
+    companion object {
+        fun <T> cloneOf(lazyOther: CompletableFuture<FutureHolder<T>>): FutureHolder<T> =
+            FutureHolder(lazyFuture = lazy {
+                // fixme #1: this lazy might be an issue - seems it's not called from finalizer , i.e. returned sub-results of actions are not valid
+                lazyOther.takeIf { it.isDone }?.get()?.lazyFuture?.value
+                    ?: throw UninitializedException
+            })
+
+        val UninitializedException = IllegalStateException(
+            """
+                |AsyncCall instance has not been fully initialized. This is because it's producer function
+                |has not been called or finished yet. This exception mostly indicates an error in internal saga
+                |processing - please inform authors providing details for investigation.
+            """.trimMargin().lines().joinToString(" ") { it.trimEnd() }
+        )
+    }
 }
 
 @SagaDsl
@@ -219,89 +263,91 @@ private class SagaResultImpl<T> : SagaResult<T> {
 annotation class SagaDsl
 
 private fun waitCompletion(
-    actions: MutableList<ReversibleOp.NonSuspending<Future<*>>>,
+    actions: MutableList<ReversibleOp.NonSuspending<AsyncCall<*>>>,
     rollbackStore: MutableList<() -> Unit>
 ) {
     if (actions.isEmpty()) return
 
     // invoke each until first fail
-    var failedOn: Pair<ActionStage<*>, () -> Unit>? = null
-    val stagesWithRollbacks = actions.asSequence()
+    var failedOn: Pair<AsyncCallStage<*>, () -> Unit>? = null
+    var active = actions.asSequence()
         .map {
-            val (future, rollback) = it.invoke()
-            ActionStage.of(future) to rollback
+            val (asyncCall, rollback) = it.invoke()
+            AsyncCallStage.of(asyncCall) to rollback
         }
-        .takeWhile { (result, rollback) ->
-            val shouldStop = result is ActionStage.Failed || result is ActionStage.Error
-            if (shouldStop) {
-                failedOn = result to rollback
-            }
+        .takeWhile { (stage, rollback) ->
+            val shouldStop = stage is AsyncCallStage.Failed || stage is AsyncCallStage.Error
+            if (shouldStop) failedOn = stage to rollback
             !shouldStop
         }.toList()
-        .let { if (failedOn != null) it + failedOn!! else it }
+        .let { list -> failedOn?.let { list + it } ?: list }
 
-    var active = stagesWithRollbacks
     while (active.isNotEmpty()) {
-        active.map { ActionStage.of(it.first.future) to it.second }
+        active
+            .map { AsyncCallStage.of(it.first.call) as AsyncCallStage<*> to it.second }
             .groupBy { it.first::class }
             .also { results ->
-                val processing = results[ActionStage.Processing::class]?.map {
-                    it.first as ActionStage.Processing<*> to it.second
+                val processing = results[AsyncCallStage.Processing::class]?.map {
+                    it.first as AsyncCallStage.Processing<*> to it.second
                 }.orEmpty()
-                val success = results[ActionStage.Completed::class]?.map {
-                    it.first as ActionStage.Completed<*> to it.second
+                val success = results[AsyncCallStage.Completed::class]?.map {
+                    it.first as AsyncCallStage.Completed<*> to it.second
                 }.orEmpty()
-                val failed = results[ActionStage.Failed::class]?.map {
-                    it.first as ActionStage.Failed<*> to it.second
+                val failed = results[AsyncCallStage.Failed::class]?.map {
+                    it.first as AsyncCallStage.Failed<*> to it.second
                 }.orEmpty()
-                val error = results[ActionStage.Error::class]?.map {
-                    it.first as ActionStage.Error<*> to it.second
+                val error = results[AsyncCallStage.Error::class]?.map {
+                    it.first as AsyncCallStage.Error<*> to it.second
                 }.orEmpty()
                 active = processing
                 val unsuccessful = listOf(failed, error)
                 val nestedRollbacks = failed.mapNotNull { it.first.rollback }
                 rollbackStore += success.map { it.second } + nestedRollbacks
-                val shouldCancelActive = unsuccessful.any { it.isNotEmpty() }
-                if (shouldCancelActive) {
-                    processing.filterNot { it.first.cancel() }
-                        .forEach { rollbackStore += it.second }
+                val anyFailed = unsuccessful.any { it.isNotEmpty() }
+                if (anyFailed) {
                     active = emptyList()
-                }
-                when {
-                    error.isNotEmpty() -> throw error.first().first.cause
-                    failed.isNotEmpty() -> throw failed.first().first.cause
+                    processing.forEach { (stage, rollback) ->
+                        if (stage.call.cancel()) rollbackStore += rollback
+                    }
+                    when {
+                        error.isNotEmpty() -> throw error.first().first.cause
+                        failed.isNotEmpty() -> throw failed.first().first.cause
+                    }
                 }
             }
     }
 }
 
-private sealed class ActionStage<T>(val future: Future<T>) {
-    class Processing<T>(future: Future<T>) : ActionStage<T>(future) {
-        fun cancel(): Boolean = future.cancel(true)
-    }
+private sealed class AsyncCallStage<T>(val call: AsyncCall<T>) {
+    class Processing<T>(call: AsyncCall<T>) : AsyncCallStage<T>(call)
 
-    class Failed<T>(val cause: InternalSagaEvent, val rollback: (() -> Unit)?, future: Future<T>) :
-        ActionStage<T>(future)
+    class Failed<T>(
+        val cause: InternalSagaEvent,
+        val rollback: (() -> Unit)?,
+        call: AsyncCall<T>,
+    ) : AsyncCallStage<T>(call)
 
-    class Completed<T>(val value: T, future: Future<T>) : ActionStage<T>(future)
+    class Completed<T>(val value: T, call: AsyncCall<T>) : AsyncCallStage<T>(call)
 
-    class Error<T>(val cause: Throwable, future: Future<T>) : ActionStage<T>(future)
+    class Error<T>(val cause: Throwable, call: AsyncCall<T>) : AsyncCallStage<T>(call)
 
     companion object {
-        fun <T> of(future: Future<T>): ActionStage<T> =
-            when {
-                !future.isDone -> Processing(future)
-                else -> runCatching { future.get() }
-                    .fold(
-                        onFailure = {
-                            when (val cause = (it as? ExecutionException)?.cause ?: it) {
-                                is InternalSagaEvent ->
-                                    Failed(cause, (cause as? NestedSagaFailure)?.rollback, future)
-                                else -> Error(cause, future)
-                            }
-                        },
-                        onSuccess = { Completed(it, future) },
-                    )
+        fun <T> of(call: AsyncCall<T>): AsyncCallStage<T> =
+            with(call.revealed()) {
+                when {
+                    !isDone -> Processing(this)
+                    else -> runCatching { getResult() }
+                        .fold(
+                            onFailure = {
+                                when (val cause = (it as? ExecutionException)?.cause ?: it) {
+                                    is NestedSagaFailure -> Failed(cause, cause.rollback, this)
+                                    is InternalSagaEvent -> Failed(cause, null, this)
+                                    else -> Error(cause, this)
+                                }
+                            },
+                            onSuccess = { Completed(it, this) },
+                        )
+                }
             }
     }
 }
