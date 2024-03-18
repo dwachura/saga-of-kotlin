@@ -5,7 +5,11 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Future
 
-// TODO: debug logs + tracking of saga nesting
+/*
+ * TODO:
+ *  debug logs + tracking of saga nesting
+ *  saga configuration (passed as first param with some default values)
+ */
 fun <Success, Failure : Any> saga(
     configuration: SagaBuildingScope<Success, Failure>.() -> SagaResult<Success>
 ): Saga.NonSuspending<Success, Failure> =
@@ -120,7 +124,6 @@ private class SagaBuildingScopeImpl<Success, Failure : Any> : SagaBuildingScope<
             lateT
         }, { SagaActionRollbackScopeImpl.compensateWith(lateT.getResult()) })
         actions += reversibleOp
-        // fixme #1: this is not the same as holder returned from action(). Lazy into FutureHolder might be an issue
         return lateT
     }
 
@@ -141,6 +144,7 @@ private class SagaBuildingScopeImpl<Success, Failure : Any> : SagaBuildingScope<
         return sagaResult
     }
 
+    // todo: idea for future - allow nested sagas to be run asynchronously
     override fun <T> atomic(saga: Saga<T, Failure>): LateResult<T> {
         val op = when (saga) {
             is Saga.NonSuspending -> saga.toReversibleOp()
@@ -215,20 +219,18 @@ private class FutureHolder<T>(private val lazyFuture: Lazy<Future<T>>) : LateRes
     constructor(future: Future<T>) : this(lazyFuture = lazyOf(future))
 
     private val future: Future<T>
-        get() = lazyFuture.takeIf { it.isInitialized() }?.value
-            ?: throw UninitializedException
+        get() = lazyFuture.value
 
     val isDone: Boolean
         get() = future.isDone
 
     fun getResult(): T = future.get()
 
-    override fun cancel(): Boolean = future.cancel(true)
+    override fun cancel(): Boolean = if (!future.isDone) future.cancel(true) else false
 
     companion object {
         fun <T> cloneOf(lazyOther: CompletableFuture<FutureHolder<T>>): FutureHolder<T> =
             FutureHolder(lazyFuture = lazy {
-                // fixme #1: this lazy might be an issue - seems it's not called from finalizer , i.e. returned sub-results of actions are not valid
                 lazyOther.takeIf { it.isDone }?.get()?.lazyFuture?.value
                     ?: throw UninitializedException
             })
@@ -307,7 +309,7 @@ private fun waitCompletion(
                 if (anyFailed) {
                     active = emptyList()
                     processing.forEach { (stage, rollback) ->
-                        if (stage.call.cancel()) rollbackStore += rollback
+                        if (!stage.call.cancel()) rollbackStore += rollback
                     }
                     when {
                         error.isNotEmpty() -> throw error.first().first.cause

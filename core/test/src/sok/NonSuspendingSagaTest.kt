@@ -3,8 +3,10 @@ package io.dwsoft.sok
 import io.kotest.assertions.asClue
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.throwables.shouldThrowAny
+import io.kotest.assertions.throwables.shouldThrowAnyUnit
 import io.kotest.core.spec.style.FreeSpec
 import io.kotest.matchers.comparables.shouldNotBeGreaterThan
+import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
@@ -17,6 +19,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import kotlin.reflect.KClass
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.microseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.measureTimedValue
 
@@ -285,8 +288,6 @@ class NonSuspendingSagaTest : FreeSpec({
     }
 
     // TODO:
-    //  * check behavior of compensation of parallel actions of
-    //  nested saga when the completes only partially
     //  * what happens when failed action cancels another and the later fails during this -
     //  does cancel() returns false? Is rollback of such action skipped (as it should)?
     "Parallel actions" - {
@@ -306,10 +307,35 @@ class NonSuspendingSagaTest : FreeSpec({
             duration.shouldNotBeGreaterThan(0.15.seconds)
         }
 
+        "Nested sagas are run synchronously" {
+            val recorder = Recorder<Int>()
+            val saga = saga<Unit, Nothing> {
+                atomic(asynchronous({ delayed(0.3.seconds) { recorder(4) }.asAsync() }, compensateWith = {}))
+                atomic(
+                    saga {
+                        atomic(asynchronous({ delayed(0.2.seconds) { recorder(1) }.asAsync() }, compensateWith = {}))
+                        atomic(asynchronous({ delayed(0.21.seconds) { recorder(2) }.asAsync() }, compensateWith = {}))
+                        result {}
+                    }
+                )
+                atomic(asynchronous({ delayed(0.05.seconds) { recorder(3) }.asAsync() }, compensateWith = {}))
+                result {}
+            }
+
+            val (result, duration) = measureTimedValue {
+                saga.execute()
+            }
+
+            result.shouldBeInstanceOf<Saga.Result.Success<Unit>>()
+            recorder.shouldBeCalledWith(1, 2, 3, 4)
+            duration shouldBeBetween 0.3.seconds..0.35.seconds
+        }
+
         "Only completely finished actions are compensated" {
             val rollback = RollbackRecorder<Int>()
             val pool = Executors.newFixedThreadPool(3)
             var cancelledFuture: Future<Int>? = null
+
             val result = saga<Int, String> {
                 val v1 = atomic(asynchronous({
                     pool.delayed(0.1.seconds) { 1 }.asAsync()
@@ -329,52 +355,65 @@ class NonSuspendingSagaTest : FreeSpec({
             cancelledFuture.shouldNotBeNull().isCancelled shouldBe true
         }
 
-        "Nested sagas are run synchronously" {
-            val recorder = Recorder<Int>()
-            val saga = saga<Unit, Nothing> {
-                atomic(asynchronous({ delayed(0.3.seconds) { recorder(4) }.asAsync() }, {}))
-                atomic(
+        "Partially completed nested sagas are compensated" {
+            val rollback = RollbackRecorder<Int>()
+            val unexpectedRollback = RollbackRecorder<Int>()
+            var cancelledFuture: Future<Int>? = null
+
+            val result = saga<Int, String> {
+                atomic(asynchronous({ delayed(0.1.seconds) { 1 }.asAsync() }, compensateWith = rollback))
+                val v = atomic(
                     saga {
-                        atomic(asynchronous({ delayed(0.2.seconds) { recorder(1) }.asAsync() }, {}))
-                        atomic(asynchronous({ delayed(0.21.seconds) { recorder(2) }.asAsync() }, {}))
-                        result {}
+                        atomic(asynchronous({ delayed(0.2.seconds) { 2 }.asAsync() }, compensateWith = rollback))
+                        atomic(asynchronous({ delayed(0.21.seconds) { 3 }.asAsync() }, compensateWith = rollback))
+                        atomic(asynchronous({ delayed(0.3.seconds) { 4 }.also { cancelledFuture = it }.asAsync() }, compensateWith = unexpectedRollback))
+                        val v = atomic(asynchronous({ delayed(0.22.seconds) { fail("Test") }.asAsync() }, compensateWith = unexpectedRollback))
+                        result { v.value }
                     }
                 )
-                atomic(asynchronous({ delayed(0.05.seconds) { recorder(3) }.asAsync() }, {}))
-                result {}
-            }
+                result { v.value }
+            }.execute()
 
-            val (result, duration) = measureTimedValue {
-                saga.execute()
-            }
-
-            result.shouldBeInstanceOf<Saga.Result.Success<Unit>>()
-            recorder.shouldBeCalledWith(1, 2, 3, 4)
-            duration shouldBeBetween 0.3.seconds..0.35.seconds
+            result.shouldBeInstanceOf<Saga.Result.Failure<String>>()
+                .reason shouldBe "Test"
+            rollback.shouldBeCalledWith(3, 2, 1)
+            unexpectedRollback.shouldNotBeCalled()
+            cancelledFuture.shouldNotBeNull().isCancelled shouldBe true
         }
 
-        "Cancellation Nested sagas are run synchronously" {
-            val recorder = Recorder<Int>()
-            val saga = saga<Unit, Nothing> {
-                atomic(asynchronous({ delayed(0.3.seconds) { recorder(4) }.asAsync() }, {}))
-                atomic(
-                    saga {
-                        atomic(asynchronous({ delayed(0.2.seconds) { recorder(1) }.asAsync() }, {}))
-                        atomic(asynchronous({ delayed(0.21.seconds) { recorder(2) }.asAsync() }, {}))
-                        result {}
-                    }
-                )
-                atomic(asynchronous({ delayed(0.05.seconds) { recorder(3) }.asAsync() }, {}))
-                result {}
+        "Completed actions are not cancelled" {
+            val unexpectedRollback = RollbackRecorder<Int>()
+            var cancelledFuture: Future<out Int>? = null
+            val saga = saga<Int, String> {
+                atomic(asynchronous({ delayed(0.1.seconds) { fail("Test 1") }.asAsync() }, compensateWith = unexpectedRollback))
+                atomic(asynchronous({ delayed(0.1.seconds) { fail("Test 2") }.also { cancelledFuture = it }.asAsync() }, compensateWith = unexpectedRollback))
+                result { delayed(0.2.seconds) { 1 }.get() }
             }
 
-            val (result, duration) = measureTimedValue {
+            val result = saga.execute()
+
+            result.shouldBeInstanceOf<Saga.Result.Failure<String>>()
+                .reason shouldBe "Test 1"
+            unexpectedRollback.shouldNotBeCalled()
+            cancelledFuture.shouldNotBeNull().isCancelled shouldBe false
+        }
+
+        "Uncompleted actions are cancelled and saga fail fast when error is thrown from asynchronous action" {
+            val expectedException = RuntimeException()
+            val unexpectedRollback = RollbackRecorder<Int>()
+            var cancelledFuture: Future<out Int>? = null
+            val saga = saga<Int, String> {
+                atomic(asynchronous({ delayed(0.3.seconds) { 1 }.also { cancelledFuture = it }.asAsync() }, compensateWith = unexpectedRollback))
+                atomic(asynchronous({ delayed(0.1.seconds) { 2 }.asAsync() }, compensateWith = unexpectedRollback))
+                atomic(asynchronous({ delayed(0.2.seconds) { throw expectedException }.asAsync() }, compensateWith = unexpectedRollback))
+                result { delayed(0.3.seconds) { 1 }.get() }
+            }
+
+            shouldThrow<SagaException> {
                 saga.execute()
-            }
-
-            result.shouldBeInstanceOf<Saga.Result.Success<Unit>>()
-            recorder.shouldBeCalledWith(1, 2, 3, 4)
-            duration shouldBeBetween 0.3.seconds..0.35.seconds
+            }.cause shouldBe expectedException
+            unexpectedRollback.shouldNotBeCalled()
+            cancelledFuture.shouldNotBeNull().isCancelled shouldBe true
         }
     }
 })
