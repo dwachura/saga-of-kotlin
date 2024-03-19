@@ -26,6 +26,7 @@ sealed interface Saga<Success, out Failure : Any> {
     }
 }
 
+// todo: add multi-cause support
 class SagaException private constructor(
     message: String? = null,
     cause: Throwable? = null,
